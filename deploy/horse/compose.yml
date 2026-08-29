@@ -1,0 +1,119 @@
+x-brightbean-common: &brightbean-common
+  image: ${BRIGHTBEAN_IMAGE:?Set BRIGHTBEAN_IMAGE to an immutable ghcr.io image SHA or digest}
+  entrypoint: ["/app/deploy/horse/entrypoint.sh"]
+  env_file:
+    - .env.horse
+  environment:
+    DJANGO_SETTINGS_MODULE: config.settings.production
+    POSTGRES_DB: ${POSTGRES_DB:-brightbean}
+    POSTGRES_USER: ${POSTGRES_USER:-brightbean}
+    STORAGE_BACKEND: s3
+  secrets:
+    - django_secret_key
+    - postgres_password
+    - s3_access_key_id
+    - s3_secret_access_key
+  networks:
+    - internal
+  init: true
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:size=1g,mode=1777
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  migrate:
+    <<: *brightbean-common
+    command: ["python", "manage.py", "migrate", "--noinput"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    <<: *brightbean-common
+    command: ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "2", "--threads", "2", "--timeout", "120"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - internal
+      - proxy
+    mem_limit: 768m
+    cpus: 0.75
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8000/health/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: ${TRAEFIK_NETWORK:-coolify}
+      traefik.http.routers.brightbean.rule: Host(`${BRIGHTBEAN_HOST:?Set BRIGHTBEAN_HOST}`)
+      traefik.http.routers.brightbean.entrypoints: ${TRAEFIK_ENTRYPOINT:-https}
+      traefik.http.routers.brightbean.tls: "true"
+      traefik.http.routers.brightbean.tls.certresolver: ${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      traefik.http.services.brightbean.loadbalancer.server.port: "8000"
+
+  worker:
+    <<: *brightbean-common
+    command: ["python", "manage.py", "process_tasks"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    mem_limit: 768m
+    cpus: 0.75
+    healthcheck:
+      test: ["CMD", "python", "manage.py", "check_worker_health", "--max-age", "300"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+
+  postgres:
+    image: postgres:16.10-alpine@sha256:029660641a0cfc575b14f336ba448fb8a75fd595d42e1fa316b9fb4378742297
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-brightbean}
+      POSTGRES_USER: ${POSTGRES_USER:-brightbean}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - internal
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 0.50
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  internal:
+    internal: true
+  proxy:
+    external: true
+    name: ${TRAEFIK_NETWORK:-coolify}
+
+volumes:
+  postgres_data:
+
+secrets:
+  django_secret_key:
+    file: ${BRIGHTBEAN_SECRETS_DIR:?Set BRIGHTBEAN_SECRETS_DIR}/django_secret_key
+  postgres_password:
+    file: ${BRIGHTBEAN_SECRETS_DIR:?Set BRIGHTBEAN_SECRETS_DIR}/postgres_password
+  s3_access_key_id:
+    file: ${BRIGHTBEAN_SECRETS_DIR:?Set BRIGHTBEAN_SECRETS_DIR}/s3_access_key_id
+  s3_secret_access_key:
+    file: ${BRIGHTBEAN_SECRETS_DIR:?Set BRIGHTBEAN_SECRETS_DIR}/s3_secret_access_key

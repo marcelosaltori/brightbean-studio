@@ -1,0 +1,101 @@
+name: Horse image
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: horse-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+  LOCAL_IMAGE: brightbean-horse:${{ github.sha }}
+
+jobs:
+  build-sbom-scan:
+    name: Build, SBOM and vulnerability scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Build immutable candidate
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          load: true
+          push: false
+          tags: ${{ env.LOCAL_IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Generate image SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ${{ env.LOCAL_IMAGE }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+
+      - name: Scan fixed high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          scan-type: image
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+          version: v0.74.0
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: brightbean-sbom-${{ github.sha }}
+          path: sbom.spdx.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push full-SHA image and write manifest
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_ref="${IMAGE_NAME}:${GITHUB_SHA}"
+          docker tag "${LOCAL_IMAGE}" "${image_ref}"
+          docker push "${image_ref}"
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${image_ref}")"
+          sbom_sha256="$(sha256sum sbom.spdx.json | cut -d' ' -f1)"
+          printf '{"source_sha":"%s","image":"%s","digest":"%s","sbom_sha256":"%s"}\n' \
+            "${GITHUB_SHA}" "${image_ref}" "${digest}" "${sbom_sha256}" > release-manifest.json
+
+      - name: Upload release manifest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: brightbean-release-${{ github.sha }}
+          path: release-manifest.json
+          if-no-files-found: error
+          retention-days: 90

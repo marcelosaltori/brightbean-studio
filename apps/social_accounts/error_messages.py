@@ -35,9 +35,13 @@ PUBLISH_TEMPORARY_MESSAGE = "The platform was temporarily unavailable. We'll ret
 PUBLISH_RATE_LIMIT_MESSAGE = "The platform's rate limit was reached. We'll retry shortly."
 PUBLISH_REJECTED_MESSAGE = "The platform rejected this post."
 PUBLISH_GENERIC_MESSAGE = "Publishing failed. Please try again."
-# The two messages above promise a retry, which is true only while attempts
-# remain. Once the budget is spent the post is permanently failed and the
-# composer must not keep telling the user to sit tight.
+PUBLISH_UNKNOWN_MESSAGE = (
+    "We could not confirm whether the platform accepted this post. "
+    "Do not retry until the remote account has been checked."
+)
+# The temporary and rate-limit messages promise a retry, which is true only
+# while attempts remain. Once the budget is spent the post is permanently
+# failed and the composer must not keep telling the user to sit tight.
 PUBLISH_EXHAUSTED_MESSAGE = (
     "Publishing kept failing, so we stopped retrying. Try again, or reconnect the account if it keeps happening."
 )

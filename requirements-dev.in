@@ -1,0 +1,10 @@
+-r requirements-prod.in
+
+ruff>=0.6,<1.0
+mypy>=1.11,<1.20
+django-stubs>=5.0,<6.0
+types-python-dateutil>=2.9,<3.0
+pytest>=8.3,<9.0
+pytest-django>=4.8,<4.13
+pytest-cov>=5.0,<6.0
+factory-boy>=3.3,<4.0

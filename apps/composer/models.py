@@ -347,6 +347,7 @@ class PlatformPost(models.Model):
         PUBLISHING = "publishing", "Publishing"
         PUBLISHED = "published", "Published"
         FAILED = "failed", "Failed"
+        UNKNOWN = "unknown", "Outcome unknown"
         ON_HOLD = "on_hold", "On Hold"
 
     # Statuses that must never be removed by *accidental* deletion paths
@@ -354,7 +355,7 @@ class PlatformPost(models.Model):
     # mid-publish row is history, and deleting it cascades away its
     # PublishLog records. Explicit deletion (the post delete action) is the
     # user's call and intentionally bypasses this.
-    PROTECTED_STATUSES = (Status.PUBLISHED, Status.PUBLISHING)
+    PROTECTED_STATUSES = (Status.PUBLISHED, Status.PUBLISHING, Status.UNKNOWN)
 
     # Statuses whose scheduled time may be changed by a calendar drag-and-drop.
     # A dropped draft/failed chip becomes ``scheduled`` (an implicit
@@ -383,8 +384,12 @@ class PlatformPost(models.Model):
         "changes_requested": {"pending_review", "draft"},
         "rejected": {"draft", "pending_review"},
         "scheduled": {"publishing", "draft"},
-        "publishing": {"published", "failed", "scheduled"},  # scheduled = retry
+        "publishing": {"published", "failed", "scheduled", "unknown"},  # scheduled = retry
         "failed": {"publishing", "draft", "scheduled"},
+        # UNKNOWN is deliberately not schedulable.  It may leave this state only
+        # after reconciliation proves the remote result or a human explicitly
+        # returns it to draft for a new approved attempt.
+        "unknown": {"published", "failed", "draft"},
         # Client-requested hold: parked out of the publish path. The team resolves
         # it back to approved (resume), draft (rework), or changes_requested. There
         # is deliberately no on_hold → scheduled edge — un-hold to ``approved`` first
@@ -411,6 +416,7 @@ class PlatformPost(models.Model):
         "published": "green",
         "partially_published": "yellow",  # only used by Post-level aggregate
         "failed": "red",
+        "unknown": "amber",
         "on_hold": "violet",
     }
 

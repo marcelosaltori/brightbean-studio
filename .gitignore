@@ -218,3 +218,7 @@ theme/static/css/dist/
 # Local seed scripts (not for version control)
 /seed_ad_analytics.py
 /seed_ad_calendar.py
+
+# Horse deploy secrets and local rendered environment
+/deploy/horse/.env.horse
+/deploy/horse/secrets/
