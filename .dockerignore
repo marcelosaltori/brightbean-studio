@@ -1,0 +1,17 @@
+.git
+.github
+.venv
+.env
+*.sqlite3
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+coverage.xml
+htmlcov
+media
+staticfiles
+test_media
+node_modules
+deploy/horse/secrets

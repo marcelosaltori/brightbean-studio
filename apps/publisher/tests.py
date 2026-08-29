@@ -304,6 +304,35 @@ class NonRetryableFailureTest(TestCase):
         self.assertIsNotNone(self.platform_post.next_retry_at)
         self.assertEqual(PublishLog.objects.filter(platform_post=self.platform_post).count(), 1)
 
+    def test_explicitly_ambiguous_error_is_unknown_without_retry(self):
+        from apps.composer.models import PlatformPost
+        from apps.social_accounts.error_messages import PUBLISH_UNKNOWN_MESSAGE
+        from providers.exceptions import PublishError
+
+        error = PublishError("connection dropped", platform="TikTok", outcome_unknown=True)
+        with patch.object(PublishEngine, "_dispatch_to_provider", side_effect=error):
+            result = PublishEngine()._publish_platform_post(self.platform_post)
+
+        self.assertFalse(result["success"])
+        self.platform_post.refresh_from_db()
+        self.assertEqual(self.platform_post.status, PlatformPost.Status.UNKNOWN)
+        self.assertEqual(self.platform_post.publish_error, PUBLISH_UNKNOWN_MESSAGE)
+        self.assertEqual(self.platform_post.retry_count, 0)
+        self.assertIsNone(self.platform_post.next_retry_at)
+
+    def test_provider_5xx_is_unknown_without_retry(self):
+        from apps.composer.models import PlatformPost
+        from providers.exceptions import APIError
+
+        error = APIError("upstream timeout", status_code=503, platform="Instagram")
+        with patch.object(PublishEngine, "_dispatch_to_provider", side_effect=error):
+            PublishEngine()._publish_platform_post(self.platform_post)
+
+        self.platform_post.refresh_from_db()
+        self.assertEqual(self.platform_post.status, PlatformPost.Status.UNKNOWN)
+        self.assertEqual(self.platform_post.retry_count, 0)
+        self.assertIsNone(self.platform_post.next_retry_at)
+
 
 class PublishedPostLeavesQueueTest(TestCase):
     """A successful publish drops the post's QueueEntry, freeing the slot."""
@@ -464,7 +493,7 @@ class PublishErrorIsNeverRawTest(TestCase):
             PUBLISH_EXHAUSTED_MESSAGE,
             PUBLISH_TEMPORARY_MESSAGE,
         )
-        from providers.exceptions import APIError
+        from providers.exceptions import PublishError
 
         self.platform_post.retry_count = MAX_RETRIES
         self.platform_post.save(update_fields=["retry_count"])
@@ -472,7 +501,7 @@ class PublishErrorIsNeverRawTest(TestCase):
         with patch.object(
             PublishEngine,
             "_dispatch_to_provider",
-            side_effect=APIError("upstream down", status_code=503, platform="Instagram"),
+            side_effect=PublishError("safe transient failure", platform="Instagram"),
         ):
             PublishEngine()._publish_platform_post(self.platform_post)
 

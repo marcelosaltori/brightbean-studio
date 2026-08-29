@@ -32,9 +32,10 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
+          cache-dependency-path: requirements-dev.lock
 
-      - name: Install ruff
-        run: pip install "ruff==0.15.9"
+      - name: Install locked dependencies
+        run: pip install --require-hashes -r requirements-dev.lock
 
       - name: ruff check
         run: ruff check .
@@ -60,9 +61,10 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
+          cache-dependency-path: requirements-dev.lock
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install locked dependencies
+        run: pip install --require-hashes -r requirements-dev.lock
 
       - name: mypy
         run: mypy apps/ config/ providers/ tests/ --ignore-missing-imports
@@ -106,9 +108,10 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
+          cache-dependency-path: requirements-dev.lock
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install locked dependencies
+        run: pip install --require-hashes -r requirements-dev.lock
 
       - name: pytest
         run: pytest --cov=apps --cov-report=term-missing

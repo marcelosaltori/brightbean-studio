@@ -22,11 +22,13 @@ _WORKFLOW_ORDER = [
     "approved",
     "scheduled",
     "publishing",
+    "unknown",
     "partially_published",
     "published",
 ]
 
-# Statuses considered "terminal publishing outcomes".
+# Statuses considered definitive terminal publishing outcomes.  ``unknown`` is
+# intentionally excluded: it blocks automation until reconciliation.
 _TERMINAL = {"published", "failed"}
 
 
@@ -51,6 +53,12 @@ def derive_post_status(statuses):
     unique = set(values)
     if len(unique) == 1:
         return values[0]
+
+    # Never hide an ambiguous remote outcome behind a sibling status.  This is
+    # the one state where operator attention is more important than aggregate
+    # workflow ordering.
+    if "unknown" in unique:
+        return "unknown"
 
     # All terminal: combine by outcome.
     if unique <= (_TERMINAL | {"failed"}):

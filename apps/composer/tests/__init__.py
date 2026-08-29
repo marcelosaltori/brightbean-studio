@@ -37,6 +37,7 @@ class PlatformPostStateMachineTest(TestCase):
         pp = self._make_pp(status="publishing")
         self.assertTrue(pp.can_transition_to("published"))
         self.assertTrue(pp.can_transition_to("failed"))
+        self.assertTrue(pp.can_transition_to("unknown"))
         # Retry path: publishing → scheduled (picked up again on next tick)
         self.assertTrue(pp.can_transition_to("scheduled"))
         self.assertFalse(pp.can_transition_to("draft"))
@@ -59,7 +60,7 @@ class PlatformPostStateMachineTest(TestCase):
         for status in ("draft", "changes_requested", "rejected", "approved", "scheduled"):
             pp = self._make_pp(status=status)
             self.assertTrue(pp.is_editable, f"{status} should be editable")
-        for status in ("publishing", "published", "failed"):
+        for status in ("publishing", "published", "failed", "unknown"):
             pp = self._make_pp(status=status)
             self.assertFalse(pp.is_editable, f"{status} should not be editable")
 
@@ -75,6 +76,8 @@ class PlatformPostStateMachineTest(TestCase):
         self.assertEqual(pp.status_color, "green")
         pp.status = "failed"
         self.assertEqual(pp.status_color, "red")
+        pp.status = "unknown"
+        self.assertEqual(pp.status_color, "amber")
 
 
 class DerivePostStatusTest(TestCase):
@@ -93,6 +96,10 @@ class DerivePostStatusTest(TestCase):
 
     def test_all_failed_is_failed(self):
         self.assertEqual(derive_post_status(["failed", "failed"]), "failed")
+
+    def test_unknown_is_never_hidden_by_sibling_outcomes(self):
+        self.assertEqual(derive_post_status(["unknown", "published"]), "unknown")
+        self.assertEqual(derive_post_status(["unknown", "scheduled"]), "unknown")
 
     def test_mixed_workflow_returns_lowest(self):
         # draft is the most conservative state — it wins over scheduled.

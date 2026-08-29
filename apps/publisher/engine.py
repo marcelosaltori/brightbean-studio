@@ -21,6 +21,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timedelta
 
+import httpx
 from background_task import background
 from django.conf import settings
 from django.db import transaction
@@ -35,11 +36,12 @@ from apps.social_accounts.error_messages import (
     PUBLISH_EXHAUSTED_MESSAGE,
     PUBLISH_GENERIC_MESSAGE,
     PUBLISH_RATE_LIMIT_MESSAGE,
+    PUBLISH_UNKNOWN_MESSAGE,
     friendly_first_comment_error,
     friendly_publish_error,
 )
 from providers import get_provider
-from providers.exceptions import ProviderError, RateLimitError
+from providers.exceptions import APIError, ProviderError, RateLimitError
 from providers.types import PostType, PublishContent
 
 from .models import PublishLog, RateLimitState
@@ -116,6 +118,25 @@ MAX_CONCURRENT_POSTS = getattr(settings, "PUBLISHER_MAX_CONCURRENT_POSTS", 4)
 FIRST_COMMENT_MAX_RETRIES = getattr(settings, "PUBLISHER_FIRST_COMMENT_MAX_RETRIES", 3)
 FIRST_COMMENT_RETRY_BACKOFF = [120, 600, 1800]  # 2min, 10min, 30min
 FirstCommentStatus = PlatformPost.FirstCommentStatus
+
+
+def _publish_exception_is_ambiguous(exc: Exception) -> bool:
+    """Whether a failed call may already have created the remote post."""
+    if getattr(exc, "outcome_unknown", False):
+        return True
+    if isinstance(exc, httpx.TransportError):
+        return True
+    return isinstance(exc, APIError) and exc.status_code is not None and exc.status_code >= 500
+
+
+def _publish_result_is_ambiguous(result: dict) -> bool:
+    """Classify failure dictionaries returned after provider dispatch."""
+    if result.get("outcome_unknown"):
+        return True
+    status_code = result.get("status_code")
+    if status_code is None:
+        return True
+    return status_code in (408, 425) or status_code >= 500
 
 
 def _first_comment_delay(workspace_id) -> int:
@@ -381,11 +402,22 @@ class PublishEngine:
                     duration_ms=duration_ms,
                 )
 
-                # A provider that reports failure in the result dict rather than
-                # raising gives us no exception to classify, and result["error"]
-                # may well be a response body — so this one always gets the
-                # generic sentence. The raw text is in the PublishLog row above.
-                self._schedule_retry(platform_post, error_msg, user_message=PUBLISH_GENERIC_MESSAGE)
+                # A provider that returned after dispatch may already have been
+                # accepted remotely.  Retry only the one explicitly safe case
+                # (rate limiting); known 4xx is permanent and an absent/5xx
+                # outcome is UNKNOWN until reconciled.
+                status_code = result.get("status_code")
+                if status_code == 429:
+                    self._schedule_retry(platform_post, error_msg, user_message=PUBLISH_RATE_LIMIT_MESSAGE)
+                elif _publish_result_is_ambiguous(result):
+                    self._mark_unknown(platform_post, error_msg)
+                else:
+                    self._fail_permanently(
+                        platform_post,
+                        error_msg,
+                        user_message=PUBLISH_GENERIC_MESSAGE,
+                        reason=f"provider response {status_code}",
+                    )
                 return result
 
         except Exception as e:
@@ -400,7 +432,9 @@ class PublishEngine:
             )
 
             user_message = friendly_publish_error(e)
-            if getattr(e, "retryable", True):
+            if _publish_exception_is_ambiguous(e):
+                self._mark_unknown(platform_post, error_msg)
+            elif getattr(e, "retryable", True):
                 self._schedule_retry(platform_post, error_msg, user_message=user_message)
             else:
                 self._fail_permanently(platform_post, error_msg, user_message=user_message)
@@ -626,6 +660,18 @@ class PublishEngine:
             "PlatformPost %s failed (%s): %s",
             platform_post.id,
             reason,
+            error_msg,
+        )
+
+    def _mark_unknown(self, platform_post, error_msg):
+        """Park an ambiguous remote outcome without scheduling another send."""
+        platform_post.status = PlatformPost.Status.UNKNOWN
+        platform_post.publish_error = PUBLISH_UNKNOWN_MESSAGE
+        platform_post.next_retry_at = None
+        platform_post.save(update_fields=["status", "publish_error", "next_retry_at", "updated_at"])
+        logger.error(
+            "PlatformPost %s outcome UNKNOWN; automatic retry blocked: %s",
+            platform_post.id,
             error_msg,
         )
 

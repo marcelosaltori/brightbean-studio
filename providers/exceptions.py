@@ -6,6 +6,10 @@ class ProviderError(Exception):
 
     ``retryable=False`` marks the error as permanent: the publish engine
     fails the post immediately instead of scheduling backoff retries.
+
+    ``outcome_unknown=True`` means a publish request may have reached the
+    remote platform, but no authoritative outcome came back.  The publisher
+    must stop and reconcile instead of retrying blindly.
     """
 
     def __init__(
@@ -14,10 +18,12 @@ class ProviderError(Exception):
         platform: str = "",
         raw_response: dict | None = None,
         retryable: bool = True,
+        outcome_unknown: bool = False,
     ):
         self.platform = platform
         self.raw_response = raw_response or {}
         self.retryable = retryable
+        self.outcome_unknown = outcome_unknown
         super().__init__(message)
 
 

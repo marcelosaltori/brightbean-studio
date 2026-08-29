@@ -84,3 +84,19 @@ class RateLimitState(models.Model):
         if self.requests_remaining > 0:
             return True
         return not self.is_rate_limited
+
+
+class WorkerHeartbeat(models.Model):
+    """Singleton-style liveness record for the shared publishing worker."""
+
+    name = models.CharField(max_length=64, primary_key=True, default="publisher")
+    last_started_at = models.DateTimeField(null=True, blank=True)
+    last_completed_at = models.DateTimeField(null=True, blank=True)
+    last_error_at = models.DateTimeField(null=True, blank=True)
+    last_error_class = models.CharField(max_length=255, blank=True, default="")
+
+    class Meta:
+        db_table = "publisher_worker_heartbeat"
+
+    def __str__(self):
+        return f"WorkerHeartbeat({self.name})"
