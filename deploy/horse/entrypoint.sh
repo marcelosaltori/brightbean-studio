@@ -13,10 +13,13 @@ read_secret() {
 export SECRET_KEY="$(read_secret /run/secrets/django_secret_key)"
 postgres_password="$(read_secret /run/secrets/postgres_password)"
 encoded_password="$(python -c 'import sys; from urllib.parse import quote; print(quote(sys.argv[1], safe=""))' "$postgres_password")"
-export DATABASE_URL="postgres://${POSTGRES_USER}:${encoded_password}@postgres:5432/${POSTGRES_DB}"
+postgres_host="${POSTGRES_HOST:-brightbean-db}"
+export DATABASE_URL="postgres://${POSTGRES_USER}:${encoded_password}@${postgres_host}:5432/${POSTGRES_DB}"
 
-export S3_ACCESS_KEY_ID="$(read_secret /run/secrets/s3_access_key_id)"
-export S3_SECRET_ACCESS_KEY="$(read_secret /run/secrets/s3_secret_access_key)"
+if [ "${STORAGE_BACKEND:-s3}" = "s3" ]; then
+    export S3_ACCESS_KEY_ID="$(read_secret /run/secrets/s3_access_key_id)"
+    export S3_SECRET_ACCESS_KEY="$(read_secret /run/secrets/s3_secret_access_key)"
+fi
 
-unset postgres_password encoded_password
+unset postgres_password encoded_password postgres_host
 exec "$@"
