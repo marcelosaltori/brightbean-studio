@@ -1,0 +1,64 @@
+services:
+  migrate:
+    environment:
+      STORAGE_BACKEND: local
+      MEDIA_ROOT: /app/media
+    secrets: !override
+      - django_secret_key
+      - postgres_password
+
+  app:
+    environment:
+      STORAGE_BACKEND: local
+      MEDIA_ROOT: /app/media
+    secrets: !override
+      - django_secret_key
+      - postgres_password
+    volumes:
+      - ${BRIGHTBEAN_MEDIA_DIR:-/opt/brightbean/media}:/app/media
+
+  worker:
+    environment:
+      STORAGE_BACKEND: local
+      MEDIA_ROOT: /app/media
+    secrets: !override
+      - django_secret_key
+      - postgres_password
+    volumes:
+      - ${BRIGHTBEAN_MEDIA_DIR:-/opt/brightbean/media}:/app/media
+
+  media:
+    image: nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
+    user: "101:101"
+    volumes:
+      - ./nginx-media.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${BRIGHTBEAN_MEDIA_DIR:-/opt/brightbean/media}:/srv/media:ro
+    networks:
+      - proxy
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=4m,uid=101,gid=101,mode=1777
+      - /var/cache/nginx:size=16m,uid=101,gid=101,mode=0755
+      - /var/run:size=1m,uid=101,gid=101,mode=0755
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 32m
+    cpus: 0.10
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: ${TRAEFIK_NETWORK:-coolify}
+      traefik.http.routers.brightbean-media.rule: Host(`${BRIGHTBEAN_HOST}`) && PathPrefix(`/media/`)
+      traefik.http.routers.brightbean-media.entrypoints: ${TRAEFIK_ENTRYPOINT:-https}
+      traefik.http.routers.brightbean-media.tls: "true"
+      traefik.http.routers.brightbean-media.tls.certresolver: ${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      traefik.http.routers.brightbean-media.priority: "200"
+      traefik.http.services.brightbean-media.loadbalancer.server.port: "8080"

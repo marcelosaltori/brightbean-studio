@@ -7,7 +7,8 @@ x-brightbean-common: &brightbean-common
     DJANGO_SETTINGS_MODULE: config.settings.production
     POSTGRES_DB: ${POSTGRES_DB:-brightbean}
     POSTGRES_USER: ${POSTGRES_USER:-brightbean}
-    STORAGE_BACKEND: s3
+    POSTGRES_HOST: brightbean-db
+    STORAGE_BACKEND: ${STORAGE_BACKEND:-s3}
   secrets:
     - django_secret_key
     - postgres_password
@@ -46,7 +47,7 @@ services:
     mem_limit: 768m
     cpus: 0.75
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8000/health/"]
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--header", "Host: ${BRIGHTBEAN_HOST}", "http://127.0.0.1:8000/health/"]
       interval: 30s
       timeout: 5s
       start_period: 30s
@@ -69,7 +70,7 @@ services:
     mem_limit: 768m
     cpus: 0.75
     healthcheck:
-      test: ["CMD", "python", "manage.py", "check_worker_health", "--max-age", "300"]
+      test: ["CMD", "/app/deploy/horse/entrypoint.sh", "python", "manage.py", "check_worker_health", "--max-age", "300"]
       interval: 30s
       timeout: 10s
       start_period: 120s
@@ -86,7 +87,9 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
-      - internal
+      internal:
+        aliases:
+          - brightbean-db
     restart: unless-stopped
     mem_limit: 512m
     cpus: 0.50
