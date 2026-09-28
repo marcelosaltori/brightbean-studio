@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, call
 
 import httpx
@@ -900,8 +900,10 @@ def test_fetch_post_comments_uses_field_expansion_and_does_not_pass_caller_since
     _, kwargs = provider._request.call_args
     assert "comments.limit(50){id,message,created_time,from,parent,permalink_url}" in kwargs["params"]["fields"]
     assert kwargs["params"]["limit"] == 25
-    # The feed floor is the 30-day post window, not the caller's `since`.
-    assert kwargs["params"]["since"] < int(since.timestamp())
+    # The feed floor follows the current 30-day post window, independent of
+    # the caller's fixed historical `since`.
+    expected_floor = datetime.now(UTC) - timedelta(days=30)
+    assert abs(kwargs["params"]["since"] - expected_floor.timestamp()) < 5
 
 
 def test_fetch_post_comments_keeps_comments_older_than_since_within_the_lookback():
