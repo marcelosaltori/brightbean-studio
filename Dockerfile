@@ -23,7 +23,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ffmpeg libpq5 \
+    && apt-get install -y --no-install-recommends curl ffmpeg libpq5 libpcre2-8-0 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 brightbean \
     && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/brightbean brightbean
