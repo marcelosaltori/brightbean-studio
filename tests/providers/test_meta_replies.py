@@ -5,7 +5,8 @@ edge, DMs sent through the Send API addressed to a person's scoped ID, and the
 HUMAN_AGENT tag once the incoming message is more than 24 hours old.
 """
 
-from unittest.mock import MagicMock
+from datetime import UTC, datetime
+from unittest.mock import MagicMock, call
 
 import pytest
 
@@ -396,34 +397,39 @@ def test_facebook_polling_skips_the_pages_own_replies():
     assert [m.platform_message_id for m in messages] == ["mid.customer"]
 
 
-def test_instagram_login_polling_skips_the_accounts_own_replies():
+def test_instagram_login_polling_uses_documented_edges_and_skips_own_replies():
     provider = InstagramLoginProvider({**CREDS, "ig_user_id": "ig-self"})
     provider._request = MagicMock(
-        return_value=_resp(
-            {
-                "data": [
-                    {
-                        "id": "convo-1",
-                        "messages": {
-                            "data": [
-                                {
-                                    "id": "mid.customer",
-                                    "message": "Hi",
-                                    "from": {"id": "igsid-2", "username": "curious"},
-                                    "created_time": "2026-08-01T10:00:00+0000",
-                                },
-                                {
-                                    "id": "mid.ours",
-                                    "message": "Hello!",
-                                    "from": {"id": "ig-self", "username": "northlight"},
-                                    "created_time": "2026-08-01T10:05:00+0000",
-                                },
-                            ]
-                        },
-                    }
-                ]
-            }
-        )
+        side_effect=[
+            _resp({"data": [{"id": "convo-1", "updated_time": "2026-08-01T10:05:00+0000"}]}),
+            _resp(
+                {
+                    "id": "convo-1",
+                    "messages": {
+                        "data": [
+                            {"id": "mid.customer", "created_time": "2026-08-01T10:00:00+0000"},
+                            {"id": "mid.ours", "created_time": "2026-08-01T10:05:00+0000"},
+                        ]
+                    },
+                }
+            ),
+            _resp(
+                {
+                    "id": "mid.ours",
+                    "message": "Hello!",
+                    "from": {"id": "ig-self", "username": "northlight"},
+                    "created_time": "2026-08-01T10:05:00+0000",
+                }
+            ),
+            _resp(
+                {
+                    "id": "mid.customer",
+                    "message": "Hi",
+                    "from": {"id": "igsid-2", "username": "curious"},
+                    "created_time": "2026-08-01T10:00:00+0000",
+                }
+            ),
+        ]
     )
 
     # get_messages polls DMs and comments; this test is about the DM half, and
@@ -434,31 +440,91 @@ def test_instagram_login_polling_skips_the_accounts_own_replies():
     messages = provider.get_messages("token")
 
     assert [m.platform_message_id for m in messages] == ["mid.customer"]
+    provider._request.assert_has_calls(
+        [
+            call(
+                "GET",
+                "https://graph.instagram.com/v25.0/me/conversations",
+                access_token="token",
+                params={"platform": "instagram"},
+            ),
+            call(
+                "GET",
+                "https://graph.instagram.com/v25.0/convo-1",
+                access_token="token",
+                params={"fields": "messages"},
+            ),
+            call(
+                "GET",
+                "https://graph.instagram.com/v25.0/mid.ours",
+                access_token="token",
+                params={"fields": "id,created_time,from,to,message"},
+            ),
+            call(
+                "GET",
+                "https://graph.instagram.com/v25.0/mid.customer",
+                access_token="token",
+                params={"fields": "id,created_time,from,to,message"},
+            ),
+        ]
+    )
 
 
-def test_instagram_login_without_its_own_id_keeps_every_message():
+def test_instagram_login_dm_cursor_filters_messages_locally():
+    provider = InstagramLoginProvider(CREDS)
+    provider._request = MagicMock(
+        side_effect=[
+            _resp({"data": [{"id": "convo-1", "updated_time": "2026-08-01T10:05:00+0000"}]}),
+            _resp(
+                {
+                    "messages": {
+                        "data": [
+                            {"id": "mid.old", "created_time": "2026-08-01T09:59:00+0000"},
+                            {"id": "mid.new", "created_time": "2026-08-01T10:01:00+0000"},
+                        ]
+                    }
+                }
+            ),
+            _resp(
+                {
+                    "id": "mid.new",
+                    "message": "New message",
+                    "from": {"id": "igsid-2", "username": "curious"},
+                    "created_time": "2026-08-01T10:01:00+0000",
+                }
+            ),
+        ]
+    )
+    since = datetime(2026, 8, 1, 10, 0, tzinfo=UTC)
+
+    messages = provider._fetch_direct_messages("token", since=since)
+
+    assert [m.platform_message_id for m in messages] == ["mid.new"]
+    assert provider._request.call_args_list[0] == call(
+        "GET",
+        "https://graph.instagram.com/v25.0/me/conversations",
+        access_token="token",
+        params={"platform": "instagram"},
+    )
+    assert provider._request.call_count == 3
+
+
+def test_instagram_login_without_its_own_id_keeps_inbound_message():
     """Filtering must not silently drop inbound mail when the ID is unknown."""
     provider = InstagramLoginProvider(CREDS)
     provider._request = MagicMock(
-        return_value=_resp(
-            {
-                "data": [
-                    {
-                        "id": "convo-1",
-                        "messages": {
-                            "data": [
-                                {
-                                    "id": "mid.customer",
-                                    "message": "Hi",
-                                    "from": {"id": "igsid-2", "username": "curious"},
-                                    "created_time": "2026-08-01T10:00:00+0000",
-                                }
-                            ]
-                        },
-                    }
-                ]
-            }
-        )
+        side_effect=[
+            _resp({"data": [{"id": "convo-1", "updated_time": "2026-08-01T10:00:00+0000"}]}),
+            _resp({"messages": {"data": [{"id": "mid.customer", "created_time": "2026-08-01T10:00:00+0000"}]}}),
+            _resp(
+                {
+                    "id": "mid.customer",
+                    "message": "Hi",
+                    "from": {"id": "igsid-2", "username": "curious"},
+                    "created_time": "2026-08-01T10:00:00+0000",
+                }
+            ),
+        ]
     )
     provider._fetch_media_comments = MagicMock(return_value=[])
 

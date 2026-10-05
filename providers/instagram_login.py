@@ -15,14 +15,15 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
-from urllib.parse import urlencode
+from datetime import UTC, datetime
+from urllib.parse import urlencode, urlparse
 
 from .base import SocialProvider
 from .exceptions import APIError, OAuthError, PublishError
 from .meta_comments import (
     fetch_instagram_comments,
     find_own_instagram_comment,
+    parse_graph_time,
     resolve_comment_reply_target,
 )
 from .meta_insights import fetch_insights_safe
@@ -51,6 +52,10 @@ GRAPH_HOST = "https://graph.instagram.com"
 API_BASE = f"{GRAPH_HOST}/v25.0"
 # Subscribed on the Instagram account itself — this flow has no Facebook Page.
 INSTAGRAM_LOGIN_WEBHOOK_FIELDS = ["comments", "messages"]
+# The Conversations API only exposes message details for the 20 newest messages
+# in each thread. Keep a hard cap so one poll cannot make unbounded Graph calls.
+INSTAGRAM_DM_MESSAGE_DETAIL_LIMIT = 20
+INSTAGRAM_DM_PAGE_LIMIT = 10
 INSTAGRAM_ACCOUNT_INSIGHTS = [
     "reach",
     "views",
@@ -78,6 +83,17 @@ INSTAGRAM_MEDIA_FIELDS = [
     "like_count",
     "comments_count",
 ]
+
+
+def _parse_instagram_timestamp(value) -> datetime | None:
+    """Parse ISO timestamps and Unix ``updated_time`` values returned by Graph."""
+    if isinstance(value, (int, float)) or (isinstance(value, str) and value.strip().isdigit()):
+        try:
+            return datetime.fromtimestamp(float(value), tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+    return parse_graph_time(str(value)) if value is not None else None
+
 
 # Container polling
 CONTAINER_POLL_INTERVAL = 2  # seconds
@@ -522,6 +538,20 @@ class InstagramLoginProvider(SocialProvider):
     # ------------------------------------------------------------------
 
     def get_messages(self, access_token: str, since: datetime | None = None) -> list[InboxMessage]:
+        """Poll DMs and comments using one shared cursor for one-off callers."""
+        return self.get_messages_with_type_cursors(
+            access_token,
+            dm_since=since,
+            comment_since=since,
+        )
+
+    def get_messages_with_type_cursors(
+        self,
+        access_token: str,
+        *,
+        dm_since: datetime | None,
+        comment_since: datetime | None,
+    ) -> list[InboxMessage]:
         """Poll DMs and comments, letting either half fail on its own.
 
         The two need different permissions —
@@ -533,9 +563,12 @@ class InstagramLoginProvider(SocialProvider):
         messages: list[InboxMessage] = []
         failures: list[Exception] = []
 
-        for label, fetch in (("DM", self._fetch_direct_messages), ("comment", self._fetch_media_comments)):
+        for label, fetch, cursor in (
+            ("DM", self._fetch_direct_messages, dm_since),
+            ("comment", self._fetch_media_comments, comment_since),
+        ):
             try:
-                messages.extend(fetch(access_token, since))
+                messages.extend(fetch(access_token, cursor))
             except Exception as exc:
                 failures.append(exc)
                 logger.warning("Instagram Login %s poll failed: %s", label, exc)
@@ -563,23 +596,65 @@ class InstagramLoginProvider(SocialProvider):
         )
 
     def _fetch_direct_messages(self, access_token: str, since: datetime | None = None) -> list[InboxMessage]:
-        params: dict = {"fields": "id,participants,messages{id,message,from,created_time}"}
-        if since:
-            params["since"] = int(since.timestamp())
-
         resp = self._request(
             "GET",
             f"{API_BASE}/me/conversations",
             access_token=access_token,
-            params=params,
+            params={"platform": "instagram"},
         )
-        conversations = resp.json().get("data", [])
+        conversations = self._iter_graph_connection(access_token, resp.json())
+
+        cutoff = since
+        if cutoff and cutoff.tzinfo is None:
+            cutoff = cutoff.replace(tzinfo=UTC)
 
         own_id = str(self.credentials.get("ig_user_id", ""))
 
         messages: list[InboxMessage] = []
         for convo in conversations:
-            for msg in convo.get("messages", {}).get("data", []):
+            convo_id = str(convo.get("id") or "")
+            if not convo_id:
+                continue
+
+            updated_time = _parse_instagram_timestamp(convo.get("updated_time"))
+            if cutoff and updated_time and updated_time < cutoff:
+                continue
+
+            message_list = (
+                self._request(
+                    "GET",
+                    f"{API_BASE}/{convo_id}",
+                    access_token=access_token,
+                    params={"fields": "messages"},
+                )
+                .json()
+                .get("messages")
+                or {}
+            )
+            message_refs = list(self._iter_graph_connection(access_token, message_list))
+            message_refs.sort(
+                key=lambda item: (
+                    _parse_instagram_timestamp(item.get("created_time")) or datetime.min.replace(tzinfo=UTC)
+                ),
+                reverse=True,
+            )
+
+            # Meta returns IDs for the whole thread, but message details are
+            # readable only for its 20 newest messages.
+            for msg_ref in message_refs[:INSTAGRAM_DM_MESSAGE_DETAIL_LIMIT]:
+                message_id = str(msg_ref.get("id") or "")
+                if not message_id:
+                    continue
+                ref_time = _parse_instagram_timestamp(msg_ref.get("created_time"))
+                if cutoff and ref_time and ref_time < cutoff:
+                    continue
+
+                msg = self._request(
+                    "GET",
+                    f"{API_BASE}/{message_id}",
+                    access_token=access_token,
+                    params={"fields": "id,created_time,from,to,message"},
+                ).json()
                 sender = msg.get("from", {})
                 sender_id = str(sender.get("id", ""))
                 # A conversation contains both sides. Without this the account's
@@ -587,19 +662,38 @@ class InstagramLoginProvider(SocialProvider):
                 # re-notifying the team and restarting their SLA clock.
                 if own_id and sender_id == own_id:
                     continue
+                timestamp = _parse_instagram_timestamp(msg.get("created_time")) or ref_time
+                if timestamp is None or (cutoff and timestamp < cutoff):
+                    continue
                 messages.append(
                     InboxMessage(
-                        platform_message_id=msg["id"],
+                        platform_message_id=str(msg.get("id") or message_id),
                         sender_id=sender_id,
                         sender_name=sender.get("name", sender.get("username", "")),
                         text=msg.get("message", ""),
-                        timestamp=datetime.fromisoformat(msg["created_time"].replace("+0000", "+00:00")),
+                        timestamp=timestamp,
                         message_type="dm",
                         # sender_id is the IGSID the messaging endpoint replies to.
-                        extra={"conversation_id": convo["id"], "sender_id": sender_id},
+                        extra={"conversation_id": convo_id, "sender_id": sender_id},
                     )
                 )
         return messages
+
+    def _iter_graph_connection(self, access_token: str, connection: dict):
+        """Yield Graph connection rows while following bounded, same-host pages."""
+        pages = 0
+        while connection:
+            yield from connection.get("data", [])
+            next_url = (connection.get("paging") or {}).get("next")
+            pages += 1
+            if not next_url or pages >= INSTAGRAM_DM_PAGE_LIMIT:
+                if next_url:
+                    logger.debug("Instagram DM pagination capped at %d pages", INSTAGRAM_DM_PAGE_LIMIT)
+                return
+            if urlparse(next_url).netloc != urlparse(API_BASE).netloc:
+                logger.warning("Ignoring off-host Instagram DM pagination URL")
+                return
+            connection = self._request("GET", next_url, access_token=access_token).json()
 
     def reply_to_message(
         self,
