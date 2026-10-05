@@ -117,10 +117,35 @@ class InboxSyncEngine:
         )
 
         try:
-            messages = provider.get_messages(
-                access_token=account.oauth_access_token,
-                since=last_msg,
-            )
+            if account.platform == "instagram_login":
+                last_dm = (
+                    InboxMessage.objects.filter(
+                        social_account=account,
+                        message_type=InboxMessage.MessageType.DM,
+                    )
+                    .order_by("-received_at")
+                    .values_list("received_at", flat=True)
+                    .first()
+                )
+                last_comment = (
+                    InboxMessage.objects.filter(
+                        social_account=account,
+                        message_type=InboxMessage.MessageType.COMMENT,
+                    )
+                    .order_by("-received_at")
+                    .values_list("received_at", flat=True)
+                    .first()
+                )
+                messages = provider.get_messages_with_type_cursors(
+                    access_token=account.oauth_access_token,
+                    dm_since=last_dm,
+                    comment_since=last_comment,
+                )
+            else:
+                messages = provider.get_messages(
+                    access_token=account.oauth_access_token,
+                    since=last_msg,
+                )
         except NotImplementedError:
             return
         except Exception:

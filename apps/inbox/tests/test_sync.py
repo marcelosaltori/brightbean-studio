@@ -74,6 +74,44 @@ def test_first_message_on_quiet_account_still_notifies(connected_account):
         notify_new.assert_called_once()
 
 
+def test_instagram_login_sync_uses_separate_dm_and_comment_cursors():
+    comment_time = timezone.now() - timedelta(hours=2)
+    account = SimpleNamespace(id="ig-login-sync-1", platform="instagram_login", oauth_access_token="token")
+
+    def cursor_query(value):
+        query = SimpleNamespace()
+        query.order_by = lambda *_args: SimpleNamespace(
+            values_list=lambda *_args, **_kwargs: SimpleNamespace(first=lambda: value)
+        )
+        return query
+
+    all_messages_query = cursor_query(comment_time)
+    seen_types_query = SimpleNamespace(
+        values_list=lambda *_args, **_kwargs: SimpleNamespace(distinct=lambda: ["comment"])
+    )
+    dm_query = cursor_query(None)
+    comment_query = cursor_query(comment_time)
+
+    with (
+        patch("apps.inbox.tasks.get_provider") as get_provider,
+        patch("apps.publisher.engine._resolve_publish_credentials", return_value={}),
+        patch.object(
+            InboxMessage.objects,
+            "filter",
+            side_effect=[all_messages_query, seen_types_query, dm_query, comment_query],
+        ),
+    ):
+        provider = get_provider.return_value
+        provider.get_messages_with_type_cursors.return_value = []
+        InboxSyncEngine()._sync_account(account)
+
+    provider.get_messages_with_type_cursors.assert_called_once_with(
+        access_token=account.oauth_access_token,
+        dm_since=None,
+        comment_since=comment_time,
+    )
+
+
 @pytest.mark.django_db
 def test_mastodon_sync_passes_per_account_instance_url(workspace):
     # Regression: sync used to call get_provider(platform) with no credentials, so the
