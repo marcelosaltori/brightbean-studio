@@ -83,11 +83,21 @@ def _meta_receive(request, platforms: list[str]):
         logger.warning("Invalid JSON in Meta webhook payload.")
         return HttpResponse("Bad request", status=400)
 
-    _process_meta_events(payload, platforms, valid_secrets)
+    stats = _process_meta_events(payload, platforms, valid_secrets)
+    if platforms == ["instagram_login"]:
+        logger.info(
+            "Instagram Login webhook accepted: entries=%d matched_accounts=%d "
+            "messaging_events=%d dm_events_with_id=%d dm_records_created=%d",
+            stats["entries"],
+            stats["matched_accounts"],
+            stats["messaging_events"],
+            stats["dm_events_with_id"],
+            stats["dm_records_created"],
+        )
     return HttpResponse("OK", status=200)
 
 
-def _process_meta_events(payload: dict, platforms: list[str], valid_secrets: set[str]):
+def _process_meta_events(payload: dict, platforms: list[str], valid_secrets: set[str]) -> dict[str, int]:
     """Process Meta (Facebook/Instagram) webhook events into InboxMessages.
 
     An event is processed only for SocialAccounts whose platform is in
@@ -95,16 +105,39 @@ def _process_meta_events(payload: dict, platforms: list[str], valid_secrets: set
     `valid_secrets`). This binds each event to the org that owns the signing app,
     preventing one org's secret from forging events into another org's accounts.
     """
-    for entry in payload.get("entry", []):
+    entries = payload.get("entry", [])
+    if not isinstance(entries, list):
+        entries = []
+    stats = {
+        "entries": len(entries),
+        "matched_accounts": 0,
+        "messaging_events": 0,
+        "dm_events_with_id": 0,
+        "dm_records_created": 0,
+    }
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        messaging_events = entry.get("messaging", [])
+        if not isinstance(messaging_events, list):
+            messaging_events = []
+        stats["messaging_events"] += len(messaging_events)
+        stats["dm_events_with_id"] += sum(
+            bool((event.get("message") or {}).get("mid")) for event in messaging_events if isinstance(event, dict)
+        )
+
         page_id = entry.get("id")
         if not page_id:
             continue
 
-        accounts = SocialAccount.objects.filter(
-            account_platform_id=page_id,
-            platform__in=platforms,
-            connection_status=SocialAccount.ConnectionStatus.CONNECTED,
-        ).select_related("workspace__organization")
+        accounts = list(
+            SocialAccount.objects.filter(
+                account_platform_id=page_id,
+                platform__in=platforms,
+                connection_status=SocialAccount.ConnectionStatus.CONNECTED,
+            ).select_related("workspace__organization")
+        )
 
         for account in accounts:
             account_secret = resolve_app_secret(account.platform, account.workspace.organization_id)
@@ -114,12 +147,16 @@ def _process_meta_events(payload: dict, platforms: list[str], valid_secrets: set
                     account.id,
                 )
                 continue
+            stats["matched_accounts"] += 1
 
             for change in entry.get("changes", []):
                 _handle_facebook_change(account, change)
 
-            for messaging in entry.get("messaging", []):
-                _handle_facebook_messaging(account, messaging)
+            for messaging in messaging_events:
+                if _handle_facebook_messaging(account, messaging):
+                    stats["dm_records_created"] += 1
+
+    return stats
 
 
 # --- Webhook entry points ---
@@ -393,15 +430,17 @@ def _upsert_instagram_mention(account, value: dict):
 
 def _handle_facebook_messaging(account, messaging: dict):
     """Handle a Facebook/Instagram messaging event (DM)."""
-    message_data = messaging.get("message", {})
+    message_data = messaging.get("message") or {}
+    if not isinstance(message_data, dict):
+        return False
     mid = message_data.get("mid")
     if not mid:
-        return
+        return False
 
     sender = messaging.get("sender", {})
     text = message_data.get("text", "")
 
-    _create_if_new(
+    return _create_if_new(
         account=account,
         platform_message_id=str(mid),
         message_type=InboxMessage.MessageType.DM,
@@ -459,6 +498,7 @@ def _create_if_new(
         from .tasks import InboxSyncEngine
 
         InboxSyncEngine()._notify_new_message(obj)
+    return created
 
 
 # --- YouTube PubSubHubbub ---
