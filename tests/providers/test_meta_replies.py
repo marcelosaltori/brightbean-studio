@@ -407,26 +407,20 @@ def test_instagram_login_polling_uses_documented_edges_and_skips_own_replies():
                     "id": "convo-1",
                     "messages": {
                         "data": [
-                            {"id": "mid.customer", "created_time": "2026-08-01T10:00:00+0000"},
-                            {"id": "mid.ours", "created_time": "2026-08-01T10:05:00+0000"},
+                            {
+                                "id": "mid.customer",
+                                "created_time": "2026-08-01T10:00:00+0000",
+                                "from": {"id": "igsid-2", "username": "curious"},
+                                "message": "Hi",
+                            },
+                            {
+                                "id": "mid.ours",
+                                "created_time": "2026-08-01T10:05:00+0000",
+                                "from": {"id": "ig-self", "username": "northlight"},
+                                "message": "Hello!",
+                            },
                         ]
                     },
-                }
-            ),
-            _resp(
-                {
-                    "id": "mid.ours",
-                    "message": "Hello!",
-                    "from": {"id": "ig-self", "username": "northlight"},
-                    "created_time": "2026-08-01T10:05:00+0000",
-                }
-            ),
-            _resp(
-                {
-                    "id": "mid.customer",
-                    "message": "Hi",
-                    "from": {"id": "igsid-2", "username": "curious"},
-                    "created_time": "2026-08-01T10:00:00+0000",
                 }
             ),
         ]
@@ -446,28 +440,17 @@ def test_instagram_login_polling_uses_documented_edges_and_skips_own_replies():
                 "GET",
                 "https://graph.instagram.com/v25.0/me/conversations",
                 access_token="token",
-                params={"platform": "instagram"},
+                params={"platform": "instagram", "fields": "id,updated_time", "limit": 50},
             ),
             call(
                 "GET",
                 "https://graph.instagram.com/v25.0/convo-1",
                 access_token="token",
-                params={"fields": "messages"},
-            ),
-            call(
-                "GET",
-                "https://graph.instagram.com/v25.0/mid.ours",
-                access_token="token",
-                params={"fields": "id,created_time,from,to,message"},
-            ),
-            call(
-                "GET",
-                "https://graph.instagram.com/v25.0/mid.customer",
-                access_token="token",
-                params={"fields": "id,created_time,from,to,message"},
+                params={"fields": "messages.limit(20){id,created_time,from,to,message}"},
             ),
         ]
     )
+    assert provider._request.call_count == 2
 
 
 def test_instagram_login_dm_cursor_filters_messages_locally():
@@ -479,18 +462,20 @@ def test_instagram_login_dm_cursor_filters_messages_locally():
                 {
                     "messages": {
                         "data": [
-                            {"id": "mid.old", "created_time": "2026-08-01T09:59:00+0000"},
-                            {"id": "mid.new", "created_time": "2026-08-01T10:01:00+0000"},
+                            {
+                                "id": "mid.old",
+                                "created_time": "2026-08-01T09:59:00+0000",
+                                "from": {"id": "igsid-2"},
+                                "message": "Old message",
+                            },
+                            {
+                                "id": "mid.new",
+                                "created_time": "2026-08-01T10:01:00+0000",
+                                "from": {"id": "igsid-2", "username": "curious"},
+                                "message": "New message",
+                            },
                         ]
                     }
-                }
-            ),
-            _resp(
-                {
-                    "id": "mid.new",
-                    "message": "New message",
-                    "from": {"id": "igsid-2", "username": "curious"},
-                    "created_time": "2026-08-01T10:01:00+0000",
                 }
             ),
         ]
@@ -504,9 +489,9 @@ def test_instagram_login_dm_cursor_filters_messages_locally():
         "GET",
         "https://graph.instagram.com/v25.0/me/conversations",
         access_token="token",
-        params={"platform": "instagram"},
+        params={"platform": "instagram", "fields": "id,updated_time", "limit": 50},
     )
-    assert provider._request.call_count == 3
+    assert provider._request.call_count == 2
 
 
 def test_instagram_login_without_its_own_id_keeps_inbound_message():
@@ -515,13 +500,18 @@ def test_instagram_login_without_its_own_id_keeps_inbound_message():
     provider._request = MagicMock(
         side_effect=[
             _resp({"data": [{"id": "convo-1", "updated_time": "2026-08-01T10:00:00+0000"}]}),
-            _resp({"messages": {"data": [{"id": "mid.customer", "created_time": "2026-08-01T10:00:00+0000"}]}}),
             _resp(
                 {
-                    "id": "mid.customer",
-                    "message": "Hi",
-                    "from": {"id": "igsid-2", "username": "curious"},
-                    "created_time": "2026-08-01T10:00:00+0000",
+                    "messages": {
+                        "data": [
+                            {
+                                "id": "mid.customer",
+                                "message": "Hi",
+                                "from": {"id": "igsid-2", "username": "curious"},
+                                "created_time": "2026-08-01T10:00:00+0000",
+                            }
+                        ]
+                    }
                 }
             ),
         ]
@@ -529,3 +519,43 @@ def test_instagram_login_without_its_own_id_keeps_inbound_message():
     provider._fetch_media_comments = MagicMock(return_value=[])
 
     assert len(provider.get_messages("token")) == 1
+
+
+def test_instagram_login_backfill_pages_conversations_but_not_old_message_details():
+    """A large thread must not drain quota by walking unreadable history."""
+    provider = InstagramLoginProvider(CREDS)
+    page_two = "https://graph.instagram.com/v25.0/me/conversations?after=page2"
+    thread = {
+        "messages": {
+            "data": [
+                {
+                    "id": f"mid.{i}",
+                    "created_time": f"2026-08-01T10:{i:02}:00+0000",
+                    "from": {"id": "igsid-2"},
+                    "message": "Hi",
+                }
+                for i in range(21)
+            ],
+            "paging": {"next": "https://graph.instagram.com/v25.0/old-message-history"},
+        }
+    }
+    provider._request = MagicMock(
+        side_effect=[
+            _resp({"data": [{"id": "convo-1"}], "paging": {"next": page_two}}),
+            _resp(thread),
+            _resp({"data": [{"id": "convo-2"}]}),
+            _resp({"messages": {"data": []}}),
+        ]
+    )
+
+    messages = provider._fetch_direct_messages("token")
+
+    assert len(messages) == 20
+    assert messages[0].platform_message_id == "mid.20"
+    assert messages[-1].platform_message_id == "mid.1"
+    assert [c.args[1] for c in provider._request.call_args_list] == [
+        "https://graph.instagram.com/v25.0/me/conversations",
+        "https://graph.instagram.com/v25.0/convo-1",
+        page_two,
+        "https://graph.instagram.com/v25.0/convo-2",
+    ]
