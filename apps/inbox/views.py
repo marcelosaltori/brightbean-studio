@@ -103,19 +103,19 @@ def inbox_feed(request, workspace_id):
         qs = qs.filter(assigned_to__isnull=True)
 
     # Filters
-    platforms = request.GET.getlist("platform")
+    platforms = [value for value in request.GET.getlist("platform") if value]
     if platforms:
         qs = qs.filter(social_account__platform__in=platforms)
 
-    accounts = request.GET.getlist("account")
+    accounts = [value for value in request.GET.getlist("account") if value]
     if accounts:
         qs = qs.filter(social_account_id__in=accounts)
 
-    types = request.GET.getlist("type")
+    types = [value for value in request.GET.getlist("type") if value]
     if types:
         qs = qs.filter(message_type__in=types)
 
-    statuses = request.GET.getlist("status")
+    statuses = [value for value in request.GET.getlist("status") if value]
     if statuses:
         qs = qs.filter(status__in=statuses)
 
@@ -123,7 +123,7 @@ def inbox_feed(request, workspace_id):
     if assigned:
         qs = qs.filter(assigned_to__isnull=True) if assigned == "unassigned" else qs.filter(assigned_to_id=assigned)
 
-    sentiments = request.GET.getlist("sentiment")
+    sentiments = [value for value in request.GET.getlist("sentiment") if value]
     if sentiments:
         qs = qs.filter(sentiment__in=sentiments)
 
