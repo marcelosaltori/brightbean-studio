@@ -620,8 +620,8 @@ class InstagramLoginProvider(SocialProvider):
             if cutoff and updated_time and updated_time < cutoff:
                 continue
 
-            message_list = (
-                self._request(
+            try:
+                thread_response = self._request(
                     "GET",
                     f"{API_BASE}/{convo_id}",
                     access_token=access_token,
@@ -629,10 +629,17 @@ class InstagramLoginProvider(SocialProvider):
                         "fields": f"messages.limit({INSTAGRAM_DM_MESSAGE_DETAIL_LIMIT}){{id,created_time,from,to,message}}"
                     },
                 )
-                .json()
-                .get("messages")
-                or {}
-            )
+            except APIError as exc:
+                error = exc.raw_response.get("error") or {}
+                if exc.status_code == 400 and error.get("code") == 100 and error.get("error_subcode") == 33:
+                    # Graph can list a thread it no longer lets us read. That
+                    # one unavailable object must not discard every other DM.
+                    # Account-wide permission, quota and server errors still
+                    # propagate; do not turn those into successful empty polls.
+                    logger.warning("Skipping unreadable Instagram DM conversation (Graph 100/33)")
+                    continue
+                raise
+            message_list = thread_response.json().get("messages") or {}
             # Expand the readable window in one request. Following the entire
             # message-ID history and fetching each detail separately exhausts
             # Meta's node quota before the initial batch can reach the inbox.

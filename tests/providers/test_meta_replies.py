@@ -559,3 +559,50 @@ def test_instagram_login_backfill_pages_conversations_but_not_old_message_detail
         page_two,
         "https://graph.instagram.com/v25.0/convo-2",
     ]
+
+
+def test_instagram_login_unreadable_thread_does_not_discard_other_dms():
+    provider = InstagramLoginProvider(CREDS)
+    readable_thread = {
+        "messages": {
+            "data": [{"id": "mid.readable", "created_time": "2026-08-01T10:00:00+0000", "from": {"id": "other"}}]
+        }
+    }
+    unavailable = APIError(
+        "Object cannot be read", status_code=400, raw_response={"error": {"code": 100, "error_subcode": 33}}
+    )
+    provider._request = MagicMock(
+        side_effect=[
+            _resp({"data": [{"id": "readable-before"}, {"id": "unreadable"}, {"id": "readable-after"}]}),
+            _resp(readable_thread),
+            unavailable,
+            _resp({"messages": {"data": [{**readable_thread["messages"]["data"][0], "id": "mid.after"}]}}),
+        ]
+    )
+
+    assert [m.platform_message_id for m in provider._fetch_direct_messages("token")] == ["mid.readable", "mid.after"]
+    assert provider._request.call_count == 4
+
+
+@pytest.mark.parametrize(
+    ("status_code", "error"),
+    [(400, {"code": 100}), (400, {"code": 190}), (403, {"code": 4, "error_subcode": 1349210}), (500, {})],
+)
+def test_instagram_login_other_thread_errors_remain_failures(status_code, error):
+    provider = InstagramLoginProvider(CREDS)
+    failure = APIError("API failed", status_code=status_code, raw_response={"error": error})
+    provider._request = MagicMock(side_effect=[_resp({"data": [{"id": "thread"}]}), failure])
+
+    with pytest.raises(APIError) as caught:
+        provider._fetch_direct_messages("token")
+    assert caught.value is failure
+
+
+def test_instagram_login_unreadable_conversation_list_is_not_silently_skipped():
+    provider = InstagramLoginProvider(CREDS)
+    failure = APIError("Cannot list", status_code=400, raw_response={"error": {"code": 100, "error_subcode": 33}})
+    provider._request = MagicMock(side_effect=failure)
+
+    with pytest.raises(APIError) as caught:
+        provider._fetch_direct_messages("token")
+    assert caught.value is failure
