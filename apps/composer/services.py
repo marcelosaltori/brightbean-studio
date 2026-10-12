@@ -85,6 +85,7 @@ def create_post(
     author=None,
     status: str = "draft",
     platform_overrides: dict[Any, dict[str, str | None]] | None = None,
+    post_type: str | None = None,
 ):
     """Create a ``Post`` + one ``PlatformPost`` for ``social_account``.
 
@@ -147,6 +148,11 @@ def create_post(
         _require_approval_gate_passes(workspace)
 
     media_ids = list(media_asset_ids or [])
+    if post_type is not None:
+        if post_type not in {"story", "reel", "feed"} or not social_account.platform.startswith("instagram"):
+            raise ValueError("post_type requires an Instagram account and story, reel or feed.")
+        if post_type == "reel" and len(media_ids) != 1:
+            raise ValueError("A reel requires exactly one video asset.")
     # Pull and validate all referenced assets in a single query — fail
     # closed if any ID is missing or belongs to a different workspace.
     #
@@ -173,6 +179,11 @@ def create_post(
             raise ValueError(f"Media asset(s) not found in workspace {workspace.id}: {missing}")
 
     override = (platform_overrides or {}).get(social_account.id) or {}
+    if post_type in {"story", "reel"}:
+        if len(media_ids) != 1:
+            raise ValueError("Story/reel requires exactly one media asset.")
+        if post_type == "reel" and any(asset.media_type != "video" for asset in asset_map.values()):
+            raise ValueError("A reel requires a video asset.")
 
     with transaction.atomic():
         post = Post.objects.create(
@@ -200,6 +211,7 @@ def create_post(
             platform_specific_title=override.get("title"),
             platform_specific_caption=override.get("caption"),
             platform_specific_first_comment=override.get("first_comment"),
+            platform_extra={"post_type": post_type} if post_type is not None else {},
         )
         for position, (_mid, u) in enumerate(resolved):
             # ``u`` is validated non-None and present in ``asset_map`` above

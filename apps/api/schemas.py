@@ -160,6 +160,9 @@ class CreatePostRequest(Schema):
         description="ID of the SocialAccount to target. Must be in the key's allowlist.",
     )
     caption: str = Field(..., max_length=10_000)
+    post_type: Literal["story", "reel", "feed"] | None = Field(
+        None, description="Explicit Instagram publication format. Omitted keeps the existing publisher default."
+    )
     title: str = Field(
         "",
         max_length=255,
@@ -260,6 +263,7 @@ class PlatformPostSummary(Schema):
     published_at: dt.datetime | None
     platform_post_id: str = ""
     publish_error: str = ""
+    post_type: str | None = None
 
     @field_serializer("scheduled_at", "published_at")
     def _serialize_dt(self, value: dt.datetime | None) -> str | None:
@@ -276,6 +280,7 @@ class PlatformPostSummary(Schema):
             published_at=pp.published_at,
             platform_post_id=pp.platform_post_id or "",
             publish_error=pp.publish_error or "",
+            post_type=(pp.platform_extra or {}).get("post_type"),
         )
 
 
@@ -291,6 +296,7 @@ class PostResponse(Schema):
     proposed_publish_at: dt.datetime | None
     status: str  # derived aggregate
     platform_posts: list[PlatformPostSummary]
+    media_asset_ids: list[uuid.UUID] = Field(default_factory=list)
     created_at: dt.datetime
     updated_at: dt.datetime
 
@@ -335,6 +341,7 @@ class PostResponse(Schema):
             proposed_publish_at=post.proposed_publish_at,
             status=post.status,
             platform_posts=platform_posts,
+            media_asset_ids=[attachment.media_asset_id for attachment in post.media_attachments.all()],
             created_at=post.created_at,
             updated_at=post.updated_at,
         )

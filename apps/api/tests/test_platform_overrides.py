@@ -100,6 +100,55 @@ def _post(client, body: dict):
 
 @pytest.mark.django_db
 class TestPlatformOverrides:
+    @pytest.mark.parametrize("post_type", ["story", "feed"])
+    def test_instagram_format_round_trips_through_api(self, client_with_token, social_account, post_type):
+        social_account.platform = "instagram_login"
+        social_account.save(update_fields=["platform"])
+        # A feed has no mandatory media in the legacy API; Story must have one.
+        if post_type == "story":
+            from apps.media_library.models import MediaAsset
+
+            asset = MediaAsset.objects.create(
+                workspace=social_account.workspace,
+                organization=social_account.workspace.organization,
+                filename="story.png",
+                media_type="image",
+                mime_type="image/png",
+                processing_status="completed",
+            )
+            media_ids = [str(asset.id)]
+        else:
+            media_ids = []
+        response = _post(
+            client_with_token,
+            {
+                "social_account_id": str(social_account.id),
+                "caption": "Dia das Crianças",
+                "post_type": post_type,
+                "media_asset_ids": media_ids,
+                "action": "draft",
+            },
+        )
+        assert response.status_code == 201, response.content
+        body = response.json()
+        assert body["platform_posts"][0]["post_type"] == post_type
+        assert body["media_asset_ids"] == media_ids
+        readback = client_with_token.get(f"/api/v1/posts/{body['id']}")
+        assert readback.json()["platform_posts"][0]["post_type"] == post_type
+        assert readback.json()["media_asset_ids"] == media_ids
+
+    def test_instagram_format_rejects_other_platform_before_creation(self, client_with_token, social_account):
+        response = _post(
+            client_with_token,
+            {
+                "social_account_id": str(social_account.id),
+                "caption": "Example",
+                "post_type": "story",
+            },
+        )
+        assert response.status_code == 422
+        assert not Post.objects.exists()
+
     def test_all_three_fields_persist_to_platform_specific_columns(self, client_with_token, social_account):
         r = _post(
             client_with_token,

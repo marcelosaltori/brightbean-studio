@@ -121,7 +121,7 @@ def _get_workspace_post(request: HttpRequest, post_id: uuid.UUID) -> Post:
     from django.http import Http404
 
     post = get_object_or_404(
-        Post.objects.prefetch_related("platform_posts__social_account"),
+        Post.objects.prefetch_related("platform_posts__social_account", "media_attachments"),
         id=post_id,
         workspace_id=request.api_key.workspace_id,  # type: ignore[attr-defined]
     )
@@ -254,6 +254,7 @@ def create(request, payload: CreatePostRequest):
             author=request.user if not request.user.is_anonymous else None,
             status="scheduled" if payload.action == "schedule" else "draft",
             platform_overrides=platform_overrides,
+            post_type=payload.post_type,
         )
         body = _post_to_response(request, post)
         status_code = 201
