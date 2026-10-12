@@ -447,7 +447,7 @@ def _handle_facebook_messaging(account, messaging: dict):
         sender_name=sender.get("name", sender.get("id", "Unknown")),
         sender_id=sender.get("id", ""),
         body=text,
-        extra=messaging,
+        extra={**messaging, "source": "webhook"},
     )
 
 

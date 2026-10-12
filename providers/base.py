@@ -320,9 +320,10 @@ class SocialProvider(ABC):
             logger.error("%s API 429 response: %s", self.platform_name, response.text[:1000])
             raise RateLimitError(
                 f"Rate limit exceeded for {self.platform_name}: {response.text[:500]}",
-                retry_after=int(retry_after) if retry_after else None,
+                retry_after=int(retry_after) if retry_after and retry_after.strip().isdigit() else None,
                 platform=self.platform_name,
                 raw_response=self._safe_json(response),
+                response_headers=self._quota_headers(response),
             )
 
         if response.status_code >= 400:
@@ -331,9 +332,19 @@ class SocialProvider(ABC):
                 status_code=response.status_code,
                 platform=self.platform_name,
                 raw_response=self._safe_json(response),
+                response_headers=self._quota_headers(response),
             )
 
         return response
+
+    @staticmethod
+    def _quota_headers(response: httpx.Response) -> dict:
+        # Keep only quota metadata; never retain cookies or auth headers.
+        return {
+            key: response.headers[key]
+            for key in ("retry-after", "x-app-usage", "x-business-use-case-usage")
+            if key in response.headers
+        }
 
     @staticmethod
     def _safe_json(response: httpx.Response) -> dict:

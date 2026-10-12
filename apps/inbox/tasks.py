@@ -136,11 +136,10 @@ class InboxSyncEngine:
                     .values_list("received_at", flat=True)
                     .first()
                 )
-                messages = provider.get_messages_with_type_cursors(
-                    access_token=account.oauth_access_token,
-                    dm_since=last_dm,
-                    comment_since=last_comment,
-                )
+                from .instagram_sync import sync_instagram_batch
+
+                sync_instagram_batch(self, account, provider, seen_types, last_dm, last_comment)
+                return
             else:
                 messages = provider.get_messages(
                     access_token=account.oauth_access_token,
@@ -175,6 +174,20 @@ class InboxSyncEngine:
 
     def _upsert_message(self, account, msg, notify=True, related_post_id=None):
         """Create or update an inbox message, deduplicating by platform_message_id."""
+        extra = msg.extra
+        if account.platform == "instagram_login" and msg.message_type == "dm":
+            previous = (
+                InboxMessage.objects.filter(
+                    social_account=account,
+                    platform_message_id=msg.platform_message_id,
+                )
+                .values_list("extra", flat=True)
+                .first()
+                or {}
+            )
+            if previous.get("source") == "webhook":
+                # A later poll must not erase proof of the original delivery.
+                extra = {**msg.extra, "source": "webhook"}
         defaults = {
             "workspace": account.workspace,
             "sender_name": msg.sender_name,
@@ -183,7 +196,7 @@ class InboxSyncEngine:
             "body": msg.text,
             "message_type": msg.message_type,
             "received_at": msg.timestamp,
-            "extra": msg.extra,
+            "extra": extra,
         }
         if related_post_id:
             defaults["related_post_id"] = related_post_id

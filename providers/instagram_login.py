@@ -20,6 +20,7 @@ from urllib.parse import urlencode, urlparse
 
 from .base import SocialProvider
 from .exceptions import APIError, OAuthError, PublishError
+from .instagram_inbox import InstagramDMPoller, _is_quota_error, pause_inbox_state
 from .meta_comments import (
     fetch_instagram_comments,
     find_own_instagram_comment,
@@ -537,6 +538,80 @@ class InstagramLoginProvider(SocialProvider):
     # Inbox
     # ------------------------------------------------------------------
 
+    def get_inbox_batch(self, access_token, *, dm_state, dm_since, comment_since):
+        """Read one resumable DM batch; comments retain their own cursor."""
+        batch = InstagramDMPoller(self._request, self._read_direct_thread, API_BASE, _parse_instagram_timestamp).poll(
+            access_token, dm_state, since=dm_since
+        )
+        if batch.state.get("not_before", 0) > time.time() and batch.state.get("pause_reason") in {"quota", "usage"}:
+            return batch
+
+        quota_failure = None
+
+        def comment_request(*args, **kwargs):
+            nonlocal quota_failure
+            # The comment collector isolates failed media. Remember a quota
+            # failure here so those catches cannot keep making HTTP requests.
+            if quota_failure is not None:
+                raise quota_failure
+            try:
+                return self._request(*args, **kwargs)
+            except Exception as exc:
+                if _is_quota_error(exc):
+                    quota_failure = exc
+                    pause_inbox_state(batch.state, exc)
+                raise
+
+        try:
+            batch.messages.extend(self._fetch_media_comments(access_token, comment_since, request=comment_request))
+        except Exception as exc:
+            if _is_quota_error(exc) and quota_failure is None:
+                pause_inbox_state(batch.state, exc)
+            elif not _is_quota_error(exc):
+                logger.warning("Instagram Login comment poll failed: %s", exc)
+        return batch
+
+    def _read_direct_thread(self, access_token, convo_id, cutoff):
+        response = self._request(
+            "GET",
+            f"{API_BASE}/{convo_id}",
+            access_token=access_token,
+            params={
+                "fields": f"messages.limit({INSTAGRAM_DM_MESSAGE_DETAIL_LIMIT}){{id,created_time,from,to,message}}"
+            },
+        )
+        data = (response.json().get("messages") or {}).get("data") or []
+        data = sorted(
+            data,
+            key=lambda item: _parse_instagram_timestamp(item.get("created_time")) or datetime.min.replace(tzinfo=UTC),
+            reverse=True,
+        )
+        own_id = str(self.credentials.get("ig_user_id") or "")
+        messages = []
+        for msg in data[:INSTAGRAM_DM_MESSAGE_DETAIL_LIMIT]:
+            sender = msg.get("from") or {}
+            sender_id = str(sender.get("id") or "")
+            timestamp = _parse_instagram_timestamp(msg.get("created_time"))
+            if (
+                not msg.get("id")
+                or (own_id and sender_id == own_id)
+                or timestamp is None
+                or (cutoff and timestamp < cutoff)
+            ):
+                continue
+            messages.append(
+                InboxMessage(
+                    platform_message_id=str(msg["id"]),
+                    sender_id=sender_id,
+                    sender_name=sender.get("name", sender.get("username", "")),
+                    text=msg.get("message", ""),
+                    timestamp=timestamp,
+                    message_type="dm",
+                    extra={"conversation_id": convo_id, "sender_id": sender_id},
+                )
+            )
+        return messages, response.headers
+
     def get_messages(self, access_token: str, since: datetime | None = None) -> list[InboxMessage]:
         """Poll DMs and comments using one shared cursor for one-off callers."""
         return self.get_messages_with_type_cursors(
@@ -577,7 +652,9 @@ class InstagramLoginProvider(SocialProvider):
             raise failures[0]
         return messages
 
-    def _fetch_media_comments(self, access_token: str, since: datetime | None = None) -> list[InboxMessage]:
+    def _fetch_media_comments(
+        self, access_token: str, since: datetime | None = None, *, request=None
+    ) -> list[InboxMessage]:
         """Poll comments on the account's recent media.
 
         The ``comments`` webhook is the fast path, but an account whose
@@ -585,7 +662,7 @@ class InstagramLoginProvider(SocialProvider):
         way to backfill.
         """
         return fetch_instagram_comments(
-            self._request,
+            request or self._request,
             platform=self.platform_name,
             host=API_BASE,
             media_url=f"{API_BASE}/me/media",
