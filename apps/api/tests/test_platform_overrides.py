@@ -100,20 +100,19 @@ def _post(client, body: dict):
 
 @pytest.mark.django_db
 class TestPlatformOverrides:
-    @pytest.mark.parametrize("post_type", ["story", "feed"])
+    @pytest.mark.parametrize("post_type", ["story", "reel"])
     def test_instagram_format_round_trips_through_api(self, client_with_token, social_account, post_type):
         social_account.platform = "instagram_login"
         social_account.save(update_fields=["platform"])
-        # A feed has no mandatory media in the legacy API; Story must have one.
-        if post_type == "story":
+        if post_type in {"story", "reel"}:
             from apps.media_library.models import MediaAsset
 
             asset = MediaAsset.objects.create(
                 workspace=social_account.workspace,
                 organization=social_account.workspace.organization,
                 filename="story.png",
-                media_type="image",
-                mime_type="image/png",
+                media_type="video" if post_type == "reel" else "image",
+                mime_type="video/mp4" if post_type == "reel" else "image/png",
                 processing_status="completed",
             )
             media_ids = [str(asset.id)]

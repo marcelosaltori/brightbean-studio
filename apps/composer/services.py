@@ -149,8 +149,8 @@ def create_post(
 
     media_ids = list(media_asset_ids or [])
     if post_type is not None:
-        if post_type not in {"story", "reel", "feed"} or not social_account.platform.startswith("instagram"):
-            raise ValueError("post_type requires an Instagram account and story, reel or feed.")
+        if post_type not in {"story", "reel"} or not social_account.platform.startswith("instagram"):
+            raise ValueError("post_type requires an Instagram account and story or reel.")
         if post_type == "reel" and len(media_ids) != 1:
             raise ValueError("A reel requires exactly one video asset.")
     # Pull and validate all referenced assets in a single query — fail

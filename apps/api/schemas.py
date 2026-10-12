@@ -160,7 +160,7 @@ class CreatePostRequest(Schema):
         description="ID of the SocialAccount to target. Must be in the key's allowlist.",
     )
     caption: str = Field(..., max_length=10_000)
-    post_type: Literal["story", "reel", "feed"] | None = Field(
+    post_type: Literal["story", "reel"] | None = Field(
         None, description="Explicit Instagram publication format. Omitted keeps the existing publisher default."
     )
     title: str = Field(
