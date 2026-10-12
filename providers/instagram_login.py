@@ -600,7 +600,7 @@ class InstagramLoginProvider(SocialProvider):
             "GET",
             f"{API_BASE}/me/conversations",
             access_token=access_token,
-            params={"platform": "instagram"},
+            params={"platform": "instagram", "fields": "id,updated_time", "limit": 50},
         )
         conversations = self._iter_graph_connection(access_token, resp.json())
 
@@ -625,14 +625,20 @@ class InstagramLoginProvider(SocialProvider):
                     "GET",
                     f"{API_BASE}/{convo_id}",
                     access_token=access_token,
-                    params={"fields": "messages"},
+                    params={
+                        "fields": f"messages.limit({INSTAGRAM_DM_MESSAGE_DETAIL_LIMIT}){{id,created_time,from,to,message}}"
+                    },
                 )
                 .json()
                 .get("messages")
                 or {}
             )
-            message_refs = list(self._iter_graph_connection(access_token, message_list))
-            message_refs.sort(
+            # Expand the readable window in one request. Following the entire
+            # message-ID history and fetching each detail separately exhausts
+            # Meta's node quota before the initial batch can reach the inbox.
+            # Older details are not readable; do not follow this edge's next URL.
+            thread_messages = list(message_list.get("data") or [])
+            thread_messages.sort(
                 key=lambda item: (
                     _parse_instagram_timestamp(item.get("created_time")) or datetime.min.replace(tzinfo=UTC)
                 ),
@@ -641,20 +647,10 @@ class InstagramLoginProvider(SocialProvider):
 
             # Meta returns IDs for the whole thread, but message details are
             # readable only for its 20 newest messages.
-            for msg_ref in message_refs[:INSTAGRAM_DM_MESSAGE_DETAIL_LIMIT]:
-                message_id = str(msg_ref.get("id") or "")
+            for msg in thread_messages[:INSTAGRAM_DM_MESSAGE_DETAIL_LIMIT]:
+                message_id = str(msg.get("id") or "")
                 if not message_id:
                     continue
-                ref_time = _parse_instagram_timestamp(msg_ref.get("created_time"))
-                if cutoff and ref_time and ref_time < cutoff:
-                    continue
-
-                msg = self._request(
-                    "GET",
-                    f"{API_BASE}/{message_id}",
-                    access_token=access_token,
-                    params={"fields": "id,created_time,from,to,message"},
-                ).json()
                 sender = msg.get("from", {})
                 sender_id = str(sender.get("id", ""))
                 # A conversation contains both sides. Without this the account's
@@ -662,7 +658,7 @@ class InstagramLoginProvider(SocialProvider):
                 # re-notifying the team and restarting their SLA clock.
                 if own_id and sender_id == own_id:
                     continue
-                timestamp = _parse_instagram_timestamp(msg.get("created_time")) or ref_time
+                timestamp = _parse_instagram_timestamp(msg.get("created_time"))
                 if timestamp is None or (cutoff and timestamp < cutoff):
                     continue
                 messages.append(
