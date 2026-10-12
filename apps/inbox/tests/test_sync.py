@@ -2,7 +2,7 @@
 
 from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import pytest
 from django.utils import timezone
@@ -95,6 +95,7 @@ def test_instagram_login_sync_uses_separate_dm_and_comment_cursors():
     with (
         patch("apps.inbox.tasks.get_provider") as get_provider,
         patch("apps.publisher.engine._resolve_publish_credentials", return_value={}),
+        patch("apps.inbox.instagram_sync.sync_instagram_batch") as batch_sync,
         patch.object(
             InboxMessage.objects,
             "filter",
@@ -102,14 +103,111 @@ def test_instagram_login_sync_uses_separate_dm_and_comment_cursors():
         ),
     ):
         provider = get_provider.return_value
-        provider.get_messages_with_type_cursors.return_value = []
         InboxSyncEngine()._sync_account(account)
 
-    provider.get_messages_with_type_cursors.assert_called_once_with(
-        access_token=account.oauth_access_token,
-        dm_since=None,
-        comment_since=comment_time,
+    batch_sync.assert_called_once_with(
+        ANY,
+        account,
+        provider,
+        {"comment"},
+        None,
+        comment_time,
     )
+
+
+@pytest.mark.django_db
+def test_instagram_batch_commits_messages_and_checkpoint_atomically(connected_account):
+    from apps.inbox.instagram_sync import checkpoint_key
+    from apps.settings_manager.models import WorkspaceSetting
+    from providers.instagram_inbox import InstagramInboxBatch
+
+    connected_account.platform = "instagram_login"
+    connected_account.save(update_fields=["platform"])
+    message = _msg("first-batch", minutes_ago=1440)
+    message.extra = {"initial_backfill": True}
+    state = {"version": 1, "floor": None, "scanning": True, "page": ["next-thread"]}
+    with (
+        patch("apps.inbox.tasks.get_provider") as factory,
+        patch.object(InboxSyncEngine, "_notify_new_message") as notify_new,
+    ):
+        factory.return_value.get_inbox_batch.return_value = InstagramInboxBatch([message], state.copy())
+        InboxSyncEngine()._sync_account(connected_account)
+        checkpoint = WorkspaceSetting.objects.get(
+            workspace=connected_account.workspace, key=checkpoint_key(connected_account.id)
+        )
+        assert checkpoint.value["page"] == ["next-thread"]
+        assert "lease_token" not in checkpoint.value
+        assert InboxMessage.objects.filter(social_account=connected_account).count() == 1
+        notify_new.assert_not_called()
+
+        # A later batch is still historical, despite an existing DB DM cursor.
+        second = _msg("second-batch", minutes_ago=2880)
+        second.extra = {"initial_backfill": True}
+        factory.return_value.get_inbox_batch.return_value = InstagramInboxBatch([second], state.copy())
+        InboxSyncEngine()._sync_account(connected_account)
+        passed_state = factory.return_value.get_inbox_batch.call_args.kwargs["dm_state"]
+        assert passed_state["page"] == ["next-thread"]
+        notify_new.assert_not_called()
+
+
+@pytest.mark.django_db
+def test_instagram_failed_commit_preserves_checkpoint_for_retry(connected_account):
+    from apps.inbox.instagram_sync import checkpoint_key
+    from apps.settings_manager.models import WorkspaceSetting
+    from providers.instagram_inbox import InstagramInboxBatch
+
+    connected_account.platform = "instagram_login"
+    connected_account.save(update_fields=["platform"])
+    checkpoint = WorkspaceSetting.objects.create(
+        workspace=connected_account.workspace,
+        key=checkpoint_key(connected_account.id),
+        value={"floor": None, "page": ["thread-1", "thread-2"]},
+    )
+    with (
+        patch("apps.inbox.tasks.get_provider") as factory,
+        patch.object(InboxSyncEngine, "_upsert_message", side_effect=RuntimeError("write failed")),
+    ):
+        factory.return_value.get_inbox_batch.return_value = InstagramInboxBatch([_msg("new")], {"page": ["thread-2"]})
+        InboxSyncEngine()._sync_account(connected_account)
+    checkpoint.refresh_from_db()
+    assert checkpoint.value == {"floor": None, "page": ["thread-1", "thread-2"]}
+    assert not InboxMessage.objects.filter(social_account=connected_account).exists()
+
+
+@pytest.mark.django_db
+def test_instagram_active_lease_prevents_concurrent_poll(connected_account):
+    from apps.inbox.instagram_sync import checkpoint_key
+    from apps.settings_manager.models import WorkspaceSetting
+
+    connected_account.platform = "instagram_login"
+    connected_account.save(update_fields=["platform"])
+    WorkspaceSetting.objects.create(
+        workspace=connected_account.workspace,
+        key=checkpoint_key(connected_account.id),
+        value={"lease_until": timezone.now().timestamp() + 900, "lease_token": "other-worker"},
+    )
+    with patch("apps.inbox.tasks.get_provider") as factory:
+        InboxSyncEngine()._sync_account(connected_account)
+        factory.return_value.get_inbox_batch.assert_not_called()
+
+
+@pytest.mark.django_db
+def test_instagram_poll_preserves_webhook_delivery_source(connected_account):
+    connected_account.platform = "instagram_login"
+    connected_account.save(update_fields=["platform"])
+    message = _msg("from-webhook")
+    InboxMessage.objects.create(
+        workspace=connected_account.workspace,
+        social_account=connected_account,
+        platform_message_id=message.platform_message_id,
+        message_type="dm",
+        sender_name="Sender",
+        received_at=message.timestamp,
+        extra={"source": "webhook"},
+    )
+    InboxSyncEngine()._upsert_message(connected_account, message)
+    saved = InboxMessage.objects.get(social_account=connected_account, platform_message_id=message.platform_message_id)
+    assert saved.extra["source"] == "webhook"
 
 
 @pytest.mark.django_db

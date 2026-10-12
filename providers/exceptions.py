@@ -19,11 +19,13 @@ class ProviderError(Exception):
         raw_response: dict | None = None,
         retryable: bool = True,
         outcome_unknown: bool = False,
+        response_headers: dict | None = None,
     ):
         self.platform = platform
         self.raw_response = raw_response or {}
         self.retryable = retryable
         self.outcome_unknown = outcome_unknown
+        self.response_headers = response_headers or {}
         super().__init__(message)
 
 
