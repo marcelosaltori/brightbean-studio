@@ -29,9 +29,9 @@ RUN apt-get update \
     && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/brightbean brightbean
 
 COPY requirements.lock .
-COPY --from=wheels /wheels /wheels
-RUN pip install --no-cache-dir --no-deps --require-hashes --no-index --find-links=/wheels -r requirements.lock \
-    && rm -rf /wheels
+# Read the build artifacts without committing wheel archives to a runtime layer.
+RUN --mount=type=bind,from=wheels,source=/wheels,target=/wheels \
+    pip install --no-cache-dir --no-deps --require-hashes --no-index --find-links=/wheels -r requirements.lock
 
 COPY --chown=brightbean:brightbean . .
 COPY --from=frontend --chown=brightbean:brightbean /src/theme/static/css/dist /app/theme/static/css/dist
